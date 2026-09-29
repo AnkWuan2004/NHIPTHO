@@ -1,22 +1,12 @@
 """
 breathing_worker.py
---------------------
-Ho tro 2 nguon camera:
-    1. Laptop webcam:  --camera 0   (mac dinh)
-    2. ESP32-CAM:      --espcam http://192.168.x.x/stream
+-------------------
+Worker do nhip tho tu camera laptop/USB (mac dinh) hoac ESP32-CAM.
 
-Khi dung ESP32-CAM, script tu dong:
-    - Mo stream MJPEG qua HTTP thay vi USB.
-    - Tang do nhieu loc (GaussianBlur 7x7 thay vi 5x5) vi JPEG artifact
-      tu ESP32-CAM nhieu hon ảnh raw tu webcam.
-    - Tu dong ket noi lai neu ESP32-CAM mat mang hoac reboot.
-    - In canh bao neu FPS trung binh qua thap (<5) de nguoi dung biet
-      chat luong tin hieu co the bi anh huong.
-
-Do chinh xac cua mo hinh (bandpass 0.1-0.5Hz, prominence, distance)
-KHONG thay doi -- cac tham so nay da duoc thiet ke theo thoi gian thuc
-(tu tinh fps tu chinh du lieu), nen tu dong thich nghi voi FPS thap
-hon cua ESP32-CAM ma khong can chinh tay.
+Vi du:
+    python breathing_worker.py                 # camera laptop so 0
+    python breathing_worker.py --camera 1      # camera so 1
+    python breathing_worker.py --espcam http://192.168.1.50/stream
 """
 
 import argparse
@@ -24,31 +14,42 @@ import time
 
 import cv2
 import matplotlib.pyplot as plt
+import numpy as np
 import requests
 from ultralytics import YOLO
-
+import os
+from datetime import datetime, timezone
 from ai.roi_extractor import ROIExtractor
+from ai.pose_detector import PoseDetector
 from ai.motion_tracker import MotionTracker
 from ai.signal_filter import SignalFilter
 from ai.breathing_rate import BreathingRateEstimator
+from ai.anomaly_detector import AnomalyDetector
 
 
-# ----------------------------------------------------------------
+ESPCAM_URL = "http://172.20.10.4/stream"
+
+CAPTURE_DIR = "captures"
+WORKER_TOKEN = os.getenv("BREATHING_WORKER_TOKEN", "local-worker-token")
+MIN_ACCEPTABLE_FPS = 5.0
+os.makedirs(CAPTURE_DIR, exist_ok=True)
 def parse_args():
-    parser = argparse.ArgumentParser(description="Breathing rate worker -> push to API")
+    parser = argparse.ArgumentParser(
+        description="Breathing rate worker (laptop camera or ESP32-CAM) -> push to API"
+    )
     parser.add_argument(
         "--api", default="http://127.0.0.1:5000",
         help="Base URL cua Flask backend (mac dinh http://127.0.0.1:5000)"
     )
     parser.add_argument(
         "--camera", type=int, default=0,
-        help="Chi so camera USB/laptop (mac dinh 0). Bo qua neu dung --espcam."
+        help="Chi so camera laptop/USB (mac dinh 0). Bo qua neu dung --espcam."
     )
     parser.add_argument(
         "--espcam", type=str, default=None,
         help=(
-            "URL MJPEG stream cua ESP32-CAM, vd: http://192.168.1.50/stream. "
-            "Neu truyen tham so nay, --camera se bi bo qua."
+            "URL MJPEG stream cua ESP32-CAM. Neu truyen tham so nay, "
+            "worker se dung ESP32-CAM thay cho camera laptop."
         )
     )
     parser.add_argument(
@@ -63,39 +64,40 @@ def parse_args():
         "--roi-smoothing", type=float, default=0.3,
         help="He so lam muot EMA khi ROI di chuyen, 0-1 (mac dinh 0.3)"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="Chay khong mo cua so OpenCV/Matplotlib, phu hop may chu hoac smoke test."
+    )
+    args = parser.parse_args()
 
-
-# ----------------------------------------------------------------
-# Mo camera: ho tro ca USB va ESP32-CAM MJPEG qua HTTP
-# ----------------------------------------------------------------
-def open_capture(args):
-    """
-    Tra ve (cap, is_espcam).
-    is_espcam=True: can xu ly reconnect va kiem tra FPS rieng.
-    """
     if args.espcam:
-        url = args.espcam.strip()
-        print(f"[worker] Dang ket noi toi ESP32-CAM: {url}")
-        cap = cv2.VideoCapture(url)
-        # Giam buffer cua OpenCV xuong 2 frame: tranh doc frame cu tich
-        # dong trong hang cho khi xu ly cham (YOLO nang) -> giam do tre.
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
-        if not cap.isOpened():
-            raise RuntimeError(
-                f"Khong mo duoc stream ESP32-CAM tai {url}\n"
-                "Kiem tra: (1) ESP32-CAM da ket noi WiFi chua? "
-                "(2) Dung IP dung chua? (3) Mo http://IP/ping tren browser xem co tra 'OK' khong?"
-            )
-        print(f"[worker] Da ket noi ESP32-CAM: {url}")
-        return cap, True
+        args.espcam = args.espcam.strip()
+    if args.espcam and not (
+        args.espcam.startswith("http://") or args.espcam.startswith("https://")
+    ):
+        parser.error(
+            f"URL ESP32-CAM khong hop le: {args.espcam!r}\n"
+            "Truyen --espcam http://IP/stream"
+        )
 
-    cap = cv2.VideoCapture(args.camera)
+    return args
+
+
+def open_capture(args):
+    is_espcam = bool(args.espcam)
+    source = args.espcam if is_espcam else args.camera
+    label = f"ESP32-CAM: {source}" if is_espcam else f"camera laptop so {source}"
+    print(f"[worker] Dang mo {label}")
+    cap = cv2.VideoCapture(source)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
     if not cap.isOpened():
-        raise RuntimeError(f"Khong mo duoc camera so {args.camera}")
-    print(f"[worker] Da mo webcam so {args.camera}")
-    return cap, False
+        raise RuntimeError(
+            f"Khong mo duoc {label}.\n"
+            "Neu dung camera laptop, kiem tra camera dang duoc he thong cap quyen "
+            "va thu --camera 1. Neu dung ESP32-CAM, kiem tra IP/stream."
+        )
+    print(f"[worker] Da mo {label}")
+    return cap, is_espcam
 
 
 def reopen_espcam(url, max_retries=10, wait_sec=3.0):
@@ -117,7 +119,6 @@ def reopen_espcam(url, max_retries=10, wait_sec=3.0):
     )
 
 
-# ----------------------------------------------------------------
 def smooth_roi(old_roi, new_roi, alpha):
     if old_roi is None:
         return new_roi
@@ -126,36 +127,143 @@ def smooth_roi(old_roi, new_roi, alpha):
 
 def detect_chest_roi(model, roi_extractor, frame):
     result = model(frame, verbose=False)[0]
-    if result.keypoints is None or len(result.keypoints.xy) == 0:
-        return None
-    person = result.keypoints.xy[0]
+    person = PoseDetector.select_best_person(result)
+    if person is None:
+        return None, result, "chua thay nguoi co du diem vai/hong"
     ls, rs, lh, rh = person[5], person[6], person[11], person[12]
-    x1, y1, x2, y2 = roi_extractor.get_chest_roi(frame, ls, rs, lh, rh)
+    roi = roi_extractor.get_chest_roi(frame, ls, rs, lh, rh)
+    if roi is None:
+        return None, result, "pose co nhung ROI nguc qua nho/khong hop le"
+    x1, y1, x2, y2 = roi
     h, w = frame.shape[:2]
     x1, y1 = max(0, int(x1)), max(0, int(y1))
     x2, y2 = min(w, int(x2)), min(h, int(y2))
-    if x2 > x1 and y2 > y1:
-        return (x1, y1, x2, y2)
-    return None
+    if roi_extractor.validate_roi(frame.shape, (x1, y1, x2, y2)):
+        return (x1, y1, x2, y2), result, "da khoa ROI nguc"
+    return None, result, "ROI nguc vuot bien anh"
 
 
-def push_bpm(api_base, bpm_value):
-    url = f"{api_base}/api/breathing"
+def assess_block_quality(block_signal, min_fps=MIN_ACCEPTABLE_FPS, max_amplitude=8.0):
+    """Validate a raw optical-flow block before filtering/counting peaks."""
+    if not block_signal or len(block_signal) < 10:
+        return {"valid": False, "reason": f"insufficient_samples={len(block_signal or [])}"}
+
+    timestamps = np.asarray([item[0] for item in block_signal], dtype=float)
+    values = np.asarray([item[1] for item in block_signal], dtype=float)
+    if timestamps.size != values.size or not np.all(np.isfinite(timestamps)) or not np.all(np.isfinite(values)):
+        return {"valid": False, "reason": "non_finite_signal_or_timestamp"}
+    if np.any(np.diff(timestamps) <= 0):
+        return {"valid": False, "reason": "timestamps_not_monotonic"}
+
+    duration = float(timestamps[-1] - timestamps[0])
+    if duration <= 0:
+        return {"valid": False, "reason": "non_positive_duration"}
+    fps = float((len(values) - 1) / duration)
+    if fps < min_fps:
+        return {"valid": False, "reason": f"low_fps={fps:.2f}<{min_fps:.2f}", "fps": fps}
+
+    amplitude = float(np.ptp(values))
+    if amplitude > max_amplitude:
+        return {"valid": False, "reason": f"excessive_motion_amplitude={amplitude:.3f}", "fps": fps}
+
+    return {
+        "valid": True,
+        "reason": "ok",
+        "fps": fps,
+        "duration": duration,
+        "values": values,
+        "timestamps": timestamps,
+        "amplitude": amplitude,
+    }
+
+
+def summarize_signal_quality(filtered_signal, peaks, fps):
+    signal = np.atleast_1d(np.asarray(filtered_signal, dtype=float))
+    amplitude = float(np.ptp(signal)) if signal.size else None
+    regularity = 0.0
+    if fps and len(peaks) >= 3:
+        intervals = np.diff(np.asarray(peaks, dtype=float)) / fps
+        mean_interval = float(np.mean(intervals))
+        if mean_interval > 0:
+            regularity = float(np.clip(1.0 - (np.std(intervals) / mean_interval), 0.0, 1.0))
+    elif len(peaks) == 2:
+        regularity = 0.5
+
+    fps_score = float(np.clip((fps or 0.0) / 15.0, 0.0, 1.0))
+    amplitude_score = 1.0 if amplitude is not None and amplitude > 1e-6 else 0.0
+    quality_score = float(np.clip(0.45 * fps_score + 0.35 * amplitude_score + 0.20 * regularity, 0.0, 1.0))
+    quality = "valid" if (fps or 0.0) >= MIN_ACCEPTABLE_FPS and len(peaks) >= 2 and amplitude_score else "uncertain"
+    reason = f"fps={fps:.2f}; peaks={len(peaks)}; amplitude={amplitude:.6f}" if fps else "missing_fps"
+    return quality, quality_score, reason, amplitude, regularity
+
+
+def push_bpm(
+    api_base,
+    bpm_value,
+    frame,
+    source,
+    quality,
+    quality_score,
+    quality_reason,
+    features,
+    anomaly="unknown",
+    anomaly_score=None,
+    anomaly_reason=None,
+):
+    if not np.isfinite(bpm_value) or bpm_value <= 0:
+        print(f"[worker] Bo qua block khong hop le, khong ghi BPM={bpm_value!r}")
+        return
+
+    url = f"{api_base}/api/measurements"
+
+    image_path = None
+
+    if bpm_value > 25 or bpm_value < 5:
+        filename = datetime.now().strftime("%Y%m%d_%H%M%S.jpg")
+        image_path = os.path.join(CAPTURE_DIR, filename)
+        cv2.imwrite(image_path, frame)
+
+    detect_time = datetime.now()
+
+    print("=" * 60)
+    print(f"[Worker] Phát hiện cảnh báo : {detect_time:%Y-%m-%d %H:%M:%S}")
+    print(f"[Worker] BPM              : {bpm_value:.2f}")
+    print(f"[Worker] Ảnh              : {image_path}")
+    print("=" * 60)
+
+    payload = {
+        "bpm": round(bpm_value, 2),
+        "source": source,
+        "measured_at": datetime.now(timezone.utc).isoformat(),
+        "quality": quality,
+        "quality_score": round(quality_score, 4),
+        "quality_reason": quality_reason,
+        "anomaly": anomaly,
+        "anomaly_score": anomaly_score,
+        "anomaly_reason": anomaly_reason,
+        "features": {
+            "fps": round(features["fps"], 4) if features["fps"] is not None else None,
+            "amplitude": round(features["amplitude"], 6) if features["amplitude"] is not None else None,
+            "regularity": round(features["regularity"], 4) if features["regularity"] is not None else None,
+        },
+    }
+
     try:
         resp = requests.post(
             url,
-            json={"bpm": round(bpm_value, 2), "source": "camera_ai"},
+            json=payload,
+            headers={"Authorization": f"Bearer {WORKER_TOKEN}"},
             timeout=5,
         )
+
         if resp.status_code == 201:
-            print(f"[worker] Da gui BPM={bpm_value:.2f} len API")
+            print(f"[worker] Da gui BPM={bpm_value:.2f}")
+
         else:
-            print(f"[worker] API tra loi {resp.status_code}: {resp.text}")
+            print(resp.text)
+
     except requests.exceptions.RequestException as e:
-        print(f"[worker] Khong gui duoc len API: {e}")
-
-
-# ----------------------------------------------------------------
+        print(e)
 def main():
     args = parse_args()
     cap, is_espcam = open_capture(args)
@@ -163,42 +271,44 @@ def main():
     model = YOLO("yolo11n-pose.pt")
     roi_extractor = ROIExtractor()
 
-    # ESP32-CAM: dung blur manh hon (7x7) vi JPEG artifact nhieu hon
-    # anh raw tu webcam, Farneback rat nhay voi block artifact JPEG.
-    # Webcam: blur nhe (5x5) nhu truoc.
-    blur_kernel = (7, 7) if is_espcam else (5, 5)
-    tracker = MotionTracker(blur_kernel=blur_kernel)
+    tracker = MotionTracker(blur_kernel=(7, 7) if is_espcam else (5, 5))
+    anomaly_detector = AnomalyDetector()
 
     current_roi = None
     frame_idx = 0
 
-    # --- Cua so matplotlib ---
-    plt.ion()
-    fig, ax = plt.subplots(figsize=(10, 5))
-    raw_line, = ax.plot([], [], alpha=0.5, label="Raw Signal")
-    filtered_line, = ax.plot([], [], linewidth=2, label="Filtered Signal")
-    ax.set_title("Respiration Signal Analysis")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Vertical Motion")
-    ax.legend()
-    ax.grid(True)
-    try:
-        fig.canvas.manager.set_window_title("Breathing Signal Analysis")
-    except Exception:
-        pass
-    fig.show()
+    fig = None
+    raw_line = filtered_line = ax = None
+    if not args.headless:
+        plt.ion()
+        fig, ax = plt.subplots(figsize=(10, 5))
+        raw_line, = ax.plot([], [], alpha=0.5, label="Raw Signal")
+        filtered_line, = ax.plot([], [], linewidth=2, label="Filtered Signal")
+        ax.set_title("Respiration Signal Analysis")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Vertical Motion")
+        ax.legend()
+        ax.grid(True)
+        try:
+            fig.canvas.manager.set_window_title("Breathing Signal Analysis")
+        except Exception:
+            pass
+        fig.show()
 
     block_signal = []
     block_start_time = time.time()
 
-    # Theo doi FPS thuc te cua ESP32-CAM de canh bao nguoi dung
     fps_counter = 0
     fps_window_start = time.time()
-    MIN_ACCEPTABLE_FPS = 5.0
-
-    src_label = f"ESP32-CAM ({args.espcam})" if is_espcam else f"Webcam {args.camera}"
-    print(f"[worker] Bat dau do nhip tho qua {src_label}")
+    source_label = f"ESP32-CAM ({args.espcam})" if is_espcam else f"camera laptop so {args.camera}"
+    source_kind = "esp32cam" if is_espcam else "webcam"
+    print(f"[worker] Bat dau do nhip tho qua {source_label}")
     print(f"[worker] Khoi {args.interval:.0f} giay, Esc de dung")
+
+    pose_overlay = None
+    pose_status = "DANG TIM POSE"
+    last_pose_status = None
+    flow_status = "OPTICAL FLOW: CHUA CO ROI"
 
     try:
         while True:
@@ -212,15 +322,13 @@ def main():
                     fps_counter = 0
                     fps_window_start = time.time()
                     continue
-                else:
-                    print("[worker] Webcam khong tra frame, thu lai...")
-                    time.sleep(0.5)
-                    continue
+                print("[worker] Camera laptop khong tra frame, dang thu lai...")
+                time.sleep(0.5)
+                continue
 
             frame_idx += 1
             fps_counter += 1
 
-            # Canh bao neu FPS trung binh trong 10 giay < 5
             elapsed_fps = time.time() - fps_window_start
             if elapsed_fps >= 10.0:
                 actual_fps = fps_counter / elapsed_fps
@@ -233,82 +341,176 @@ def main():
                 fps_counter = 0
                 fps_window_start = time.time()
 
-            display_frame = frame
+            display_frame = frame.copy()
             should_update_roi = (current_roi is None) or (frame_idx % args.roi_update_every == 0)
 
             if should_update_roi:
-                detected = detect_chest_roi(model, roi_extractor, frame)
+                detected, pose_result, pose_status = detect_chest_roi(model, roi_extractor, frame)
+                try:
+                    pose_overlay = pose_result.plot(
+                        img=frame.copy(), boxes=False, labels=False, conf=False
+                    )
+                except Exception:
+                    pose_overlay = frame.copy()
+                if pose_status != last_pose_status:
+                    print(f"[worker] POSE/ROI: {pose_status}")
+                    last_pose_status = pose_status
                 if detected is not None:
                     was_none = current_roi is None
                     current_roi = smooth_roi(current_roi, detected, args.roi_smoothing)
                     if was_none:
                         print("[worker] Da phat hien vung nguc, bat dau theo doi")
 
+            if pose_overlay is not None:
+                display_frame = pose_overlay.copy()
+
             if current_roi is not None:
                 x1, y1, x2, y2 = current_roi
                 roi = frame[y1:y2, x1:x2]
                 motion = tracker.process(roi)
+                flow_status = "OPTICAL FLOW: DANG KHOI TAO"
 
                 if motion is not None:
                     block_signal.append((time.time(), motion))
+                    tracker.draw_particles(
+                        display_frame,
+                        (x1, y1, x2, y2),
+                    )
                     cv2.putText(
                         display_frame, f"Motion: {motion:.6f}", (20, 40),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
                     )
+                    flow_status = (
+                        f"OPTICAL FLOW: {motion:+.5f} | {tracker.phase_label()}"
+                    )
 
                 cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    display_frame, "CHEST ROI", (x1, max(20, y1 - 8)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+            else:
+                flow_status = "OPTICAL FLOW: CHUA CO ROI NGUC"
 
-            # Hien thi nguon camera de phan biet
-            label = "ESP32-CAM" if is_espcam else "Webcam"
+            pose_color = (0, 200, 0) if current_roi is not None else (0, 165, 255)
             cv2.putText(
-                display_frame, label, (20, display_frame.shape[0] - 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1
+                display_frame, f"POSE: {pose_status}", (20, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, pose_color, 2
+            )
+            cv2.putText(
+                display_frame, flow_status, (20, 142),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
             )
 
-            cv2.imshow("Chest ROI", display_frame)
-            key = cv2.waitKey(1)
-            if key == 27:
-                break
+            cv2.putText(
+                display_frame, "ESP32-CAM" if is_espcam else "LAPTOP CAMERA",
+                (20, display_frame.shape[0] - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1
+            )
+            cv2.putText(
+                display_frame, "HIT VAO", (20, 68),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2
+            )
+            cv2.putText(
+                display_frame, "THO RA", (20, 92),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 0), 2
+            )
+            cv2.putText(
+                display_frame, f"PHA: {tracker.phase_label()}", (20, 116),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, tracker.phase_color_now(), 2
+            )
 
-            if plt.fignum_exists(fig.number):
+            if not args.headless:
+                cv2.imshow("Chest ROI", display_frame)
+                key = cv2.waitKey(1)
+                if key == 27:
+                    break
+
+            if fig is not None and plt.fignum_exists(fig.number):
                 fig.canvas.flush_events()
 
-            # --- Tinh BPM sau moi khoi --interval giay ---
             now = time.time()
             if now - block_start_time >= args.interval:
                 if len(block_signal) >= 10:
-                    timestamps = [t for t, _ in block_signal]
-                    values = [v for _, v in block_signal]
-                    duration = timestamps[-1] - timestamps[0]
-                    actual_fps_block = len(values) / duration if duration > 0 else 0
+                    block_quality = assess_block_quality(block_signal)
+                    if not block_quality["valid"]:
+                        print(f"[worker] BO QUA BLOCK: {block_quality['reason']}; khong tao measurement")
+                        block_signal = []
+                        block_start_time = now
+                        continue
 
-                    # Kiem tra FPS cua khoi: neu qua thap, canh bao truoc khi tinh
-                    if actual_fps_block < MIN_ACCEPTABLE_FPS:
-                        print(
-                            f"[worker] CANH BAO: FPS khoi nay chi {actual_fps_block:.1f} fps "
-                            f"({len(values)} frame / {duration:.1f}s). "
-                            "BPM se duoc tinh nhung do chinh xac co the thap hon binh thuong."
+                    timestamps = block_quality["timestamps"]
+                    values = block_quality["values"]
+                    duration = block_quality["duration"]
+                    actual_fps_block = block_quality["fps"]
+
+                    try:
+                        filtered_signal = SignalFilter.smooth(
+                            values, timestamps=timestamps, duration_seconds=duration
                         )
+                        bpm, peaks = BreathingRateEstimator.estimate(filtered_signal, duration)
+                    except Exception as e:
+                        print(
+                            f"[worker] LOI khi tinh BPM cho khoi nay, BO QUA khoi "
+                            f"va tiep tuc: {type(e).__name__}: {e}"
+                        )
+                        block_signal = []
+                        block_start_time = now
+                        continue
 
-                    filtered_signal = SignalFilter.smooth(values, duration_seconds=duration)
-                    bpm, _peaks = BreathingRateEstimator.estimate(filtered_signal, duration)
-
-                    push_bpm(args.api, bpm)
+                    quality, quality_score, quality_reason, amplitude, regularity = summarize_signal_quality(
+                        filtered_signal,
+                        peaks,
+                        actual_fps_block,
+                    )
+                    anomaly_features = {
+                        "bpm": bpm,
+                        "fps": actual_fps_block,
+                        "amplitude": amplitude,
+                        "regularity": regularity,
+                        "quality_score": quality_score,
+                    }
+                    anomaly_result = anomaly_detector.predict(anomaly_features)
+                    anomaly_detector.observe(anomaly_features)
+                    push_bpm(
+                        args.api,
+                        bpm,
+                        display_frame.copy(),
+                        source_kind,
+                        quality,
+                        quality_score,
+                        quality_reason,
+                        {
+                            "fps": actual_fps_block,
+                            "amplitude": amplitude,
+                            "regularity": regularity,
+                        },
+                        anomaly=anomaly_result["anomaly"],
+                        anomaly_score=anomaly_result["anomaly_score"],
+                        anomaly_reason=anomaly_result["reason"],
+                    )
                     print(
                         f"[worker] Respiration Rate: {bpm:.2f} BPM "
                         f"(fps={actual_fps_block:.1f}, frames={len(values)}, duration={duration:.1f}s)"
                     )
 
-                    if plt.fignum_exists(fig.number):
-                        x_values = [t - timestamps[0] for t in timestamps]
-                        raw_line.set_data(x_values, values)
-                        filtered_line.set_data(x_values, filtered_signal)
+                    if fig is not None and plt.fignum_exists(fig.number):
+                        x_raw = [t - timestamps[0] for t in timestamps]
+                        if len(filtered_signal) == len(x_raw):
+                            x_filtered = x_raw
+                        else:
+                            x_filtered = np.linspace(0, duration, len(filtered_signal))
+                        raw_line.set_data(x_raw, values)
+                        filtered_line.set_data(x_filtered, filtered_signal)
                         ax.relim()
                         ax.autoscale_view()
                         fig.canvas.draw()
                         fig.canvas.flush_events()
                 else:
-                    print(f"[worker] Khoi nay chi co {len(block_signal)} sample, bo qua")
+                    print(
+                        f"[worker] BO QUA BLOCK: insufficient_samples={len(block_signal)}; "
+                        "khong tao measurement"
+                    )
 
                 block_signal = []
                 block_start_time = now
@@ -317,8 +519,10 @@ def main():
         print("[worker] Da dung theo yeu cau (Ctrl+C)")
     finally:
         cap.release()
-        cv2.destroyAllWindows()
-        plt.close(fig)
+        if not args.headless:
+            cv2.destroyAllWindows()
+        if fig is not None:
+            plt.close(fig)
 
 
 if __name__ == "__main__":

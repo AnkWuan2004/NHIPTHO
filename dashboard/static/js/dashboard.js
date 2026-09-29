@@ -10,17 +10,59 @@ const STALE_AFTER_MS = 90000; // 90s = 60s chu ky + 30s du phong tre mang
 const bpmValueEl = document.getElementById("bpm-value");
 const lastUpdatedEl = document.getElementById("last-updated");
 const lastSourceEl = document.getElementById("last-source");
+const lastQualityEl = document.getElementById("last-quality");
+const lastAnomalyEl = document.getElementById("last-anomaly");
+const lastAnomalyReasonEl = document.getElementById("last-anomaly-reason");
+const historyEmptyEl = document.getElementById("history-empty");
+const alertListEl = document.getElementById("alert-list");
+const alertsEmptyEl = document.getElementById("alerts-empty");
 const statusDotEl = document.getElementById("status-dot");
 const statusTextEl = document.getElementById("status-text");
 const statAvgEl = document.getElementById("stat-avg");
 const statMinEl = document.getElementById("stat-min");
 const statMaxEl = document.getElementById("stat-max");
+const temperatureValueEl = document.getElementById("temperature-value");
+const humidityValueEl = document.getElementById("humidity-value");
+const environmentStateEl = document.getElementById("environment-state");
+const environmentAlarmEl = document.getElementById("environment-alarm");
+const environmentAlarmTitleEl = document.getElementById("environment-alarm-title");
+const environmentAlarmMessageEl = document.getElementById("environment-alarm-message");
+const environmentUpdatedEl = document.getElementById("environment-updated");
 
 let chart = null;
+
+const SOURCE_LABELS = {
+  webcam: "Camera máy tính",
+  esp32cam: "ESP32-CAM",
+  camera_ai: "Camera + AI",
+};
+const QUALITY_LABELS = {
+  valid: "Ổn định",
+  uncertain: "Cần kiểm tra",
+  invalid: "Không hợp lệ",
+};
+const ANOMALY_LABELS = {
+  normal: "Bình thường",
+  anomaly: "Bất thường",
+  unknown: "Chưa đủ dữ liệu",
+};
+const ALARM_REASON_LABELS = {
+  temperature_high: "Nhiệt độ cao",
+  breathing_low: "Nhịp thở thấp",
+  breathing_high: "Nhịp thở cao",
+};
+
+function displayLabel(value, labels) {
+  return labels[value] || value || "—";
+}
 
 function formatTime(isoString) {
   const d = new Date(isoString);
   return d.toLocaleTimeString("vi-VN", { hour12: false });
+}
+
+function recordTimestamp(record) {
+  return record.measured_at || record.recorded_at || record.created_at;
 }
 
 function setStatus(online) {
@@ -29,22 +71,57 @@ function setStatus(online) {
   statusTextEl.textContent = online ? "Đang giám sát" : "Mất kết nối với cảm biến";
 }
 
+function resetEnvironment() {
+  temperatureValueEl.textContent = "--";
+  humidityValueEl.textContent = "--";
+  environmentStateEl.textContent = "Chưa có dữ liệu";
+  environmentAlarmEl.dataset.state = "empty";
+  environmentAlarmTitleEl.textContent = "Chưa có trạng thái";
+  environmentAlarmMessageEl.textContent = "Chưa nhận được dữ liệu từ DHT22.";
+  environmentUpdatedEl.textContent = "—";
+}
+
+function updateEnvironment(record) {
+  if (!record || !record.alarm) {
+    resetEnvironment();
+    return;
+  }
+
+  const alarm = record.alarm;
+  const reasons = (alarm.reasons || []).map((reason) => ALARM_REASON_LABELS[reason] || reason);
+  temperatureValueEl.textContent = Number(record.temperature_c).toFixed(1);
+  humidityValueEl.textContent = Number(record.humidity_pct).toFixed(1);
+  environmentStateEl.textContent = alarm.active ? "Đang cảnh báo" : "Bình thường";
+  environmentAlarmEl.dataset.state = alarm.active ? "active" : "normal";
+  environmentAlarmTitleEl.textContent = alarm.active
+    ? (reasons.join(" · ") || "Cần chú ý")
+    : "Không có cảnh báo";
+  environmentAlarmMessageEl.textContent = alarm.message || "Không có cảnh báo hiện tại";
+  environmentUpdatedEl.textContent = `Cập nhật lúc ${formatTime(record.received_at || record.measured_at)}`;
+}
+
 function updateLatest(record) {
   if (!record) {
     bpmValueEl.textContent = "--";
     lastUpdatedEl.textContent = "—";
     lastSourceEl.textContent = "—";
+    lastQualityEl.textContent = "—";
+    lastAnomalyEl.textContent = "—";
+    lastAnomalyReasonEl.textContent = "Chưa có đánh giá";
     setStatus(false);
     return;
   }
 
-  const timestamp = record.recorded_at || record.created_at;
+  const timestamp = recordTimestamp(record);
 
   bpmValueEl.textContent = Number(record.bpm).toFixed(1);
   lastUpdatedEl.textContent = formatTime(timestamp);
-  lastSourceEl.textContent = record.source || "—";
+  lastSourceEl.textContent = displayLabel(record.source, SOURCE_LABELS);
+  lastQualityEl.textContent = displayLabel(record.quality, QUALITY_LABELS);
+  lastAnomalyEl.textContent = displayLabel(record.anomaly, ANOMALY_LABELS);
+  lastAnomalyReasonEl.textContent = record.anomaly_reason || "Chưa đủ baseline để phân loại";
 
-  const isAbnormal = record.bpm < 10 || record.bpm > 30;
+  const isAbnormal = record.bpm < 5 || record.bpm > 25;
   bpmValueEl.classList.toggle("warning", isAbnormal);
 
   const ageMs = Date.now() - new Date(timestamp).getTime();
@@ -80,8 +157,11 @@ function updateStats(records) {
 
 function renderChart(records) {
   try {
+    if (historyEmptyEl) {
+      historyEmptyEl.hidden = records.length > 0;
+    }
     const ordered = [...records].reverse();
-    const labels = ordered.map((r) => formatTime(r.recorded_at || r.created_at));
+    const labels = ordered.map((r) => formatTime(recordTimestamp(r)));
     const values = ordered.map((r) => Number(r.bpm));
 
     if (chart) {
@@ -110,8 +190,8 @@ function renderChart(records) {
           {
             label: "BPM",
             data: values,
-            borderColor: "#2F6B5E",
-            backgroundColor: "rgba(79, 169, 140, 0.12)",
+            borderColor: "#4F46E5",
+            backgroundColor: "rgba(79, 70, 229, 0.12)",
             fill: true,
             tension: 0.35,
             pointRadius: 0,
@@ -155,7 +235,7 @@ function renderChart(records) {
         },
         scales: {
           x: { grid: { display: false }, ticks: { maxTicksLimit: 6 } },
-          y: { grid: { color: "#E2E8E4" }, suggestedMin: 5, suggestedMax: 30 },
+          y: { grid: { color: "#E4E4E7" }, suggestedMin: 5, suggestedMax: 30 },
         },
       },
     });
@@ -175,6 +255,10 @@ async function fetchLatest() {
       updateLatest(null);
       return;
     }
+    if (res.status === 401) {
+      window.location.href = "/login?next=/";
+      return;
+    }
     if (!res.ok) {
       console.error(`[dashboard] /api/latest trả lỗi HTTP ${res.status}`);
       return;
@@ -191,11 +275,15 @@ async function fetchHistory() {
   try {
     const res = await fetch(`/api/history?limit=${HISTORY_LIMIT}`);
     if (!res.ok) {
+      if (res.status === 401) {
+        window.location.href = "/login?next=/";
+        return;
+      }
       console.error(`[dashboard] /api/history trả lỗi HTTP ${res.status}`);
       return;
     }
     const data = await res.json();
-    const records = Array.isArray(data) ? data : [];
+    const records = Array.isArray(data?.items) ? data.items : [];
 
     // Log này giúp xác định ngay nguyên nhân: nếu thấy số > 0 ở console
     // nhưng chart/stat vẫn trống -> lỗi nằm ở renderChart/updateStats
@@ -210,9 +298,68 @@ async function fetchHistory() {
   }
 }
 
+function renderAlerts(alerts) {
+  if (!alertListEl) return;
+  alertListEl.replaceChildren();
+  if (alertsEmptyEl) alertsEmptyEl.hidden = alerts.length > 0;
+
+  for (const alert of alerts) {
+    const item = document.createElement("li");
+    const status = alert.status === "email_sent"
+      ? "Đã gửi email"
+      : alert.status === "email_failed"
+        ? "Gửi email lỗi"
+        : "Đã ghi nhận";
+    item.textContent = `${formatTime(alert.created_at)} · ${Number(alert.bpm).toFixed(1)} BPM · ${status} · ${alert.message}`;
+    alertListEl.appendChild(item);
+  }
+}
+
+async function fetchAlerts() {
+  try {
+    const res = await fetch("/api/alerts?limit=10");
+    if (res.status === 401) {
+      window.location.href = "/login?next=/";
+      return;
+    }
+    if (!res.ok) {
+      console.error(`[dashboard] /api/alerts trả lỗi HTTP ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    renderAlerts(Array.isArray(data?.items) ? data.items : []);
+  } catch (err) {
+    console.error("[dashboard] Lỗi khi lấy /api/alerts:", err);
+  }
+}
+
+async function fetchEnvironment() {
+  try {
+    const res = await fetch("/api/environment/latest");
+    if (res.status === 404) {
+      resetEnvironment();
+      return;
+    }
+    if (res.status === 401) {
+      window.location.href = "/login?next=/";
+      return;
+    }
+    if (!res.ok) {
+      console.error(`[dashboard] /api/environment/latest trả lỗi HTTP ${res.status}`);
+      return;
+    }
+    updateEnvironment(await res.json());
+  } catch (err) {
+    resetEnvironment();
+    console.error("[dashboard] Lỗi khi lấy dữ liệu DHT22:", err);
+  }
+}
+
 function poll() {
   fetchLatest();
   fetchHistory();
+  fetchAlerts();
+  fetchEnvironment();
 }
 
 const resetZoomBtn = document.getElementById("reset-zoom-btn");

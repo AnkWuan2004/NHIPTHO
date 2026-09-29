@@ -1,67 +1,154 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="vi">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Giám sát nhịp thở</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Theo dõi người bệnh | Nhịp thở</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
   <main class="page">
     <header class="page-header">
-      <div>
-        <p class="eyebrow">Breathing Monitor</p>
-        <h1>Nhịp thở theo thời gian thực</h1>
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" role="img"><path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
+        </div>
+        <div>
+          <p class="eyebrow">Theo dõi người bệnh</p>
+          <h1>Nhịp thở hôm nay</h1>
+          <p class="page-subtitle">Một người đang được theo dõi tại chỗ</p>
+        </div>
       </div>
-      <div class="status">
+      <div class="status" aria-live="polite">
         <span class="status-dot" id="status-dot"></span>
         <span id="status-text">Đang kết nối…</span>
       </div>
     </header>
 
-    <section class="hero-card">
-      <div class="breath-ring">
-        <div class="breath-pulse"></div>
-        <div class="breath-readout">
-          <span class="bpm-value" id="bpm-value">--</span>
-          <span class="bpm-unit">lần / phút</span>
+    <nav class="object-nav" aria-label="Các khu vực theo dõi">
+      <a class="object-nav-link is-active" href="#overview">Tổng quan</a>
+      <a class="object-nav-link" href="#history">Lịch sử</a>
+      <a class="object-nav-link" href="#alerts">Cảnh báo</a>
+    </nav>
+
+    <section id="overview" class="hero-card" aria-labelledby="current-reading-title">
+      <div class="hero-heading">
+        <p class="section-kicker">Đọc hiện tại</p>
+        <h2 id="current-reading-title">Nhịp thở</h2>
+      </div>
+      <div class="hero-reading">
+        <div class="breath-ring" aria-hidden="true">
+          <div class="breath-pulse"></div>
+          <div class="breath-readout">
+            <span class="bpm-value" id="bpm-value">--</span>
+            <span class="bpm-unit">lần / phút</span>
+          </div>
+        </div>
+        <div class="hero-meta">
+          <p class="hero-meta-row"><span>Cập nhật lúc</span><strong id="last-updated">—</strong></p>
+          <p class="hero-meta-row"><span>Nguồn hình ảnh</span><strong id="last-source">—</strong></p>
+          <p class="hero-meta-row"><span>Chất lượng tín hiệu</span><strong id="last-quality">—</strong></p>
+          <p class="hero-meta-row"><span>Dấu hiệu bất thường</span><strong id="last-anomaly">—</strong></p>
+          <p class="hero-meta-note" id="last-anomaly-reason">Chưa có đánh giá</p>
         </div>
       </div>
-      <div class="hero-meta">
-        <p class="hero-meta-row"><span>Cập nhật lúc</span><strong id="last-updated">—</strong></p>
-        <p class="hero-meta-row"><span>Nguồn</span><strong id="last-source">—</strong></p>
-        <p class="hero-meta-note">BPM được tính lại mỗi 1 phút (khối tín hiệu không chồng lặp)</p>
-      </div>
+      <p class="hero-footnote">Bản đo được cập nhật tự động. Nếu người bệnh đổi tư thế, hãy chờ tín hiệu ổn định.</p>
     </section>
 
-    <section class="stats-row">
-      <div class="stat-chip">
+    <section class="pulse-strip" aria-label="Tóm tắt trong ngày">
+      <div class="pulse-stat">
         <span class="stat-label">Trung bình</span>
-        <span class="stat-value" id="stat-avg">--</span>
+        <strong class="stat-value" id="stat-avg">--</strong>
       </div>
-      <div class="stat-chip">
+      <div class="pulse-stat">
         <span class="stat-label">Thấp nhất</span>
-        <span class="stat-value" id="stat-min">--</span>
+        <strong class="stat-value" id="stat-min">--</strong>
       </div>
-      <div class="stat-chip">
+      <div class="pulse-stat">
         <span class="stat-label">Cao nhất</span>
-        <span class="stat-value" id="stat-max">--</span>
+        <strong class="stat-value" id="stat-max">--</strong>
       </div>
     </section>
 
-    <section class="chart-card">
-      <div class="chart-card-header">
-        <h2>Lịch sử nhịp thở</h2>
-        <div class="chart-card-header-right">
-          <span class="chart-card-caption">100 lần đo gần nhất</span>
-          <button type="button" id="reset-zoom-btn" class="reset-zoom-btn">Reset zoom</button>
+    <section id="environment" class="surface-card environment-card" aria-labelledby="environment-title">
+      <div class="surface-header">
+        <div>
+          <p class="section-kicker">Môi trường tại chỗ</p>
+          <h2 id="environment-title">Nhiệt độ và độ ẩm</h2>
+        </div>
+        <span class="reading-state" id="environment-state">Chưa có dữ liệu</span>
+      </div>
+      <div class="environment-grid">
+        <div class="environment-stat">
+          <span class="stat-label">Nhiệt độ</span>
+          <strong class="environment-value" id="temperature-value">--</strong>
+          <span class="environment-unit">°C</span>
+        </div>
+        <div class="environment-stat">
+          <span class="stat-label">Độ ẩm</span>
+          <strong class="environment-value" id="humidity-value">--</strong>
+          <span class="environment-unit">%</span>
+        </div>
+        <div class="environment-alarm" id="environment-alarm" data-state="empty">
+          <div class="environment-alarm-heading">
+            <span class="alarm-indicator" aria-hidden="true"></span>
+            <strong id="environment-alarm-title">Chưa có trạng thái</strong>
+          </div>
+          <p id="environment-alarm-message">Chưa nhận được dữ liệu từ DHT22.</p>
+          <span class="environment-meta" id="environment-updated">—</span>
         </div>
       </div>
-      <canvas id="history-chart" height="110"></canvas>
-      <p class="chart-hint">Cuộn chuột để zoom · kéo để di chuyển · nhấp đôi hoặc bấm "Reset zoom" để về mặc định</p>
     </section>
+
+    <section class="action-row" aria-label="Tác vụ theo dõi">
+      <a class="action-card action-card-primary" href="#history">
+        <span class="action-label">Xem xu hướng</span>
+        <span class="action-copy">Theo dõi nhịp thở qua các lần đo gần nhất · Mở lịch sử</span>
+      </a>
+      <a class="action-card action-card-secondary" href="#alerts">
+        <span class="action-label">Kiểm tra cảnh báo</span>
+        <span class="action-copy">Xem các dấu hiệu cần chú ý · Mở cảnh báo</span>
+      </a>
+      <a class="action-card action-card-tertiary" href="#signal-note">
+        <span class="action-label">Đọc chất lượng</span>
+        <span class="action-copy">Hiểu khi nào bản đo đáng tin cậy · Xem hướng dẫn</span>
+      </a>
+    </section>
+
+    <section id="history" class="surface-card" aria-labelledby="history-title">
+      <div class="surface-header">
+        <div>
+          <p class="section-kicker">Lịch sử</p>
+          <h2 id="history-title">Các lần đo gần đây</h2>
+        </div>
+        <div class="surface-header-right">
+          <span class="surface-caption">100 lần đo mới nhất</span>
+          <button type="button" id="reset-zoom-btn" class="reset-zoom-btn">Đặt lại biểu đồ</button>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="history-chart" height="110"></canvas>
+        <p id="history-empty" class="chart-hint" hidden>Chưa có dữ liệu đo để hiển thị.</p>
+      </div>
+      <p class="chart-hint">Cuộn để phóng to · kéo để di chuyển · chọn “Đặt lại biểu đồ” để xem toàn bộ</p>
+    </section>
+
+    <section id="alerts" class="surface-card" aria-labelledby="alerts-title">
+      <div class="surface-header">
+        <div>
+          <p class="section-kicker">Cần chú ý</p>
+          <h2 id="alerts-title">Cảnh báo gần đây</h2>
+        </div>
+        <span class="surface-caption">10 cảnh báo mới nhất</span>
+      </div>
+      <p id="alerts-empty" class="chart-hint">Chưa có cảnh báo.</p>
+      <ul id="alert-list"></ul>
+    </section>
+
+    <p id="signal-note" class="page-note">Chất lượng tín hiệu giúp phân biệt bản đo ổn định với bản đo cần kiểm tra lại. Hệ thống hỗ trợ quan sát, không thay thế đánh giá y tế.</p>
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>

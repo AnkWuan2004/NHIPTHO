@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng nhập | Theo dõi người bệnh</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="login-page">
+  <main class="login-card" aria-labelledby="login-title">
+    <div class="login-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" role="img"><path d="M3 12h4l2-6 4 12 2-6h6" /></svg>
+    </div>
+    <p class="eyebrow">Theo dõi người bệnh</p>
+    <h1 id="login-title">Chào mừng trở lại <span class="sr-only">Đăng nhập caregiver</span></h1>
+    <p class="login-intro">Đăng nhập để xem nhịp thở hiện tại và các cảnh báo cần chú ý.</p>
+
+    <form id="login-form">
+      <label for="username">Tên đăng nhập</label>
+      <input id="username" name="username" type="text" autocomplete="username" required autofocus>
+
+      <label for="password">Mật khẩu</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+
+      <p id="login-error" class="login-error" role="alert" hidden></p>
+      <button type="submit">Đăng nhập</button>
+    </form>
+    <p class="login-note">Màn hình này chỉ dùng trong mạng nội bộ của gia đình.</p>
+  </main>
+
+  <script>
+    const form = document.getElementById('login-form');
+    const error = document.getElementById('login-error');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          username: form.username.value,
+          password: form.password.value
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        error.textContent = payload.message || 'Đăng nhập không thành công.';
+        error.hidden = false;
+        return;
+      }
+
+      window.location.href = '{{ request.args.get("next", "/") | e }}';
+    });
+  </script>
+</body>
+</html>
